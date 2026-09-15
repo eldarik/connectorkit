@@ -150,7 +150,7 @@ export class AutoConnector {
                 // Wallet Standard scopes features per account and consumers gate on this
                 // list (off-chain message signing reads `account.features` directly), so
                 // an empty array silently disables every such capability check.
-                features: Object.keys(features),
+                features: Object.keys(features) as `${string}:${string}`[],
             });
 
             const resolveAccounts = (accounts: SynthesizedAccount[]) => {
@@ -175,7 +175,10 @@ export class AutoConnector {
                             'accounts' in result &&
                             Array.isArray(result.accounts)
                         ) {
-                            return result;
+                            // Still route through `resolveAccounts`: a provider that already
+                            // speaks Wallet Standard is the one case where returning early
+                            // would leave `wallet.accounts` empty.
+                            return resolveAccounts(result.accounts as SynthesizedAccount[]);
                         }
 
                         const legacyResult = result as LegacyConnectResult | undefined;
@@ -217,7 +220,7 @@ export class AutoConnector {
                         if (this.debug) {
                             logger.error('Legacy wallet: No valid publicKey found in any expected location');
                         }
-                        return { accounts: [] };
+                        return resolveAccounts([]);
                     },
                 };
             }
@@ -225,7 +228,18 @@ export class AutoConnector {
             if (directWallet.disconnect) {
                 const disconnectFn = directWallet.disconnect;
                 features['standard:disconnect'] = {
-                    disconnect: () => disconnectFn.call(directWallet),
+                    // Drop the synthesized accounts as well. This wallet object is held in
+                    // state and reused for the next connect, so accounts left behind here
+                    // make a *denied* reconnect look like a successful one to
+                    // `ConnectionManager` - which then builds a session around an account
+                    // the wallet never re-authorized.
+                    disconnect: async () => {
+                        try {
+                            return await disconnectFn.call(directWallet);
+                        } finally {
+                            resolvedAccounts.length = 0;
+                        }
+                    },
                 };
             }
 
