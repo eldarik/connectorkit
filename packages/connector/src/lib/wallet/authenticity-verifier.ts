@@ -116,24 +116,21 @@ export class WalletAuthenticityVerifier {
             identityConsistency: 0.1,
         };
 
-        // A legacy injected provider (e.g. `window.solana`) has no `features` object
-        // at all - its Wallet Standard object is registered separately. Scoring it 0
-        // on compliance forfeits the full 0.25 weight, capping such a provider at
-        // 0.75 confidence for a criterion it structurally cannot meet. Renormalize
-        // over the criteria that actually apply instead, so a legacy provider is
-        // judged on the evidence available rather than penalized for its shape.
-        const complianceApplies = Boolean(wallet.features && typeof wallet.features === 'object');
-
-        const weightedSum =
-            (complianceApplies ? securityScore.walletStandardCompliance * weights.walletStandardCompliance : 0) +
+        // The compliance weight is deliberately NOT renormalized away when a legacy
+        // injected provider has no `features` object. Dropping it from the denominator
+        // divides every remaining score by 0.75, which *rewards* a provider for not
+        // implementing Wallet Standard: a spoofed `window.<name>` with `connect` /
+        // `disconnect` and a mismatched name scores 0.575 here (rejected) but 0.767
+        // renormalized (accepted). Legacy providers do not need the help - a genuine
+        // one clears the 0.6 threshold on method integrity, chain support, clean
+        // pattern scan and a matching identity flag, and simply tops out at 0.75
+        // confidence rather than 1.0.
+        const confidence =
+            securityScore.walletStandardCompliance * weights.walletStandardCompliance +
             securityScore.methodIntegrity * weights.methodIntegrity +
             securityScore.chainSupport * weights.chainSupport +
             securityScore.maliciousPatterns * weights.maliciousPatterns +
             securityScore.identityConsistency * weights.identityConsistency;
-
-        const totalWeight = complianceApplies ? 1 : 1 - weights.walletStandardCompliance;
-
-        const confidence = weightedSum / totalWeight;
 
         // Determine authenticity threshold
         const AUTHENTICITY_THRESHOLD = 0.6; // 60% confidence required
@@ -338,11 +335,24 @@ export class WalletAuthenticityVerifier {
         // Note: a prototype other than `Object.prototype` is NOT suspicious on its
         // own - every wallet that exposes its provider as a class instance (which is
         // most of them, Phantom included) has one. Deducting for that penalized
-        // essentially every real wallet, so only genuine tampering counts here: an
-        // own `__proto__` key, or a prototype that redefines `hasOwnProperty`.
+        // essentially every real wallet, so only genuine tampering counts here.
+        //
+        // An own `__proto__` key only exists if it was installed with
+        // `Object.defineProperty` - plain assignment and `{ __proto__: x }` both run
+        // the setter and create no own property - so this catches deliberate hiding
+        // rather than ordinary objects.
         if (Object.prototype.hasOwnProperty.call(walletObj, '__proto__')) {
             score -= 0.1;
             warnings.push('Wallet defines an own __proto__ property');
+        }
+
+        // Actual prototype pollution lands on the shared `Object.prototype` as an
+        // enumerable key and is therefore invisible to any own-property check on the
+        // wallet. `Object.keys(Object.prototype)` is empty in a clean realm.
+        const pollutedPrototypeKeys = Object.keys(Object.prototype);
+        if (pollutedPrototypeKeys.length > 0) {
+            score -= 0.2;
+            warnings.push(`Object.prototype has been polluted: ${pollutedPrototypeKeys.join(', ')}`);
         }
 
         if (

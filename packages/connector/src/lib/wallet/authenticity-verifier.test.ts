@@ -52,6 +52,36 @@ describe('WalletAuthenticityVerifier', () => {
             expect(result.authentic).toBe(false);
         });
 
+        it('should reject a spoofed legacy provider that implements no features', () => {
+            // A fake `window.<name>` with just connect/disconnect and a mismatched
+            // identity. Scoring it 0 on Wallet Standard compliance is what keeps it
+            // under the 0.6 threshold - renormalizing that weight away would push the
+            // same object to 0.77 and mark it authentic.
+            const spoofed = {
+                connect: vi.fn(),
+                disconnect: vi.fn(),
+            } as unknown as DirectWallet;
+
+            const result = WalletAuthenticityVerifier.verify(spoofed, 'Phantom');
+
+            expect(result.confidence).toBeLessThan(0.6);
+            expect(result.authentic).toBe(false);
+        });
+
+        it('should accept a genuine legacy provider despite having no features object', () => {
+            const legacy = {
+                connect: vi.fn(),
+                disconnect: vi.fn(),
+                isPhantom: true,
+                chains: ['solana:mainnet'],
+            } as unknown as DirectWallet;
+
+            const result = WalletAuthenticityVerifier.verify(legacy, 'Phantom');
+
+            expect(result.authentic).toBe(true);
+            expect(result.confidence).toBeLessThanOrEqual(1);
+        });
+
         it('should verify batch of wallets', () => {
             const wallets = [{ wallet: mockWallet, name: 'Phantom' }];
             const results = WalletAuthenticityVerifier.verifyBatch(wallets);
