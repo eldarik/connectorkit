@@ -15,9 +15,10 @@
 
 import { useMemo } from 'react';
 import type { MessageModifyingSigner } from '@solana/signers';
+import type { SolanaClusterId } from '@wallet-ui/core';
 import { useConnector } from '../ui/connector-provider';
 import { createKitSignersFromWallet } from '../lib/kit/signer-integration';
-import { normalizeNetwork } from '../utils/network';
+import { getChainIdFromClusterId, getClusterTypeFromChainId } from '../utils/chain';
 
 /**
  * Return value from useKitMessageSigner hook
@@ -45,7 +46,8 @@ export interface UseKitMessageSignerReturn {
 
 /**
  * The networks `createKitSignersFromWallet` can map to a Wallet Standard chain.
- * `localnet` has no canonical chain ID, so it falls through to the default.
+ * `localnet` and custom clusters have no canonical chain ID and resolve to
+ * `undefined`, which leaves the signer on its own default.
  */
 const MAPPABLE_NETWORKS = ['mainnet', 'devnet', 'testnet'] as const;
 
@@ -54,11 +56,14 @@ type MappableNetwork = (typeof MAPPABLE_NETWORKS)[number];
 function toMappableNetwork(clusterId: string | undefined): MappableNetwork | undefined {
     if (!clusterId) return undefined;
 
-    // Cluster IDs are `solana:<network>` (see `toClusterId` in utils/network).
-    const normalized = normalizeNetwork(clusterId.replace(/^solana:/, ''));
-    return MAPPABLE_NETWORKS.includes(normalized as MappableNetwork)
-        ? (normalized as MappableNetwork)
-        : undefined;
+    // Go through the chain utilities rather than `normalizeNetwork`, whose `default`
+    // branch answers 'mainnet' for *any* unrecognized network - a custom cluster id
+    // would otherwise be silently signed against mainnet. These return null instead.
+    const chainId = getChainIdFromClusterId(clusterId as SolanaClusterId);
+    if (!chainId) return undefined;
+
+    const clusterType = getClusterTypeFromChainId(chainId);
+    return MAPPABLE_NETWORKS.includes(clusterType as MappableNetwork) ? (clusterType as MappableNetwork) : undefined;
 }
 
 /**
@@ -100,8 +105,7 @@ export function useKitMessageSigner(): UseKitMessageSignerReturn {
             return null;
         }
 
-        return createKitSignersFromWallet(selectedWallet, account, null, toMappableNetwork(cluster?.id))
-            .messageSigner;
+        return createKitSignersFromWallet(selectedWallet, account, null, toMappableNetwork(cluster?.id)).messageSigner;
     }, [connected, selectedWallet, account, cluster]);
 
     return {

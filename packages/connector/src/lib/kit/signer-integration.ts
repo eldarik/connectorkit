@@ -119,7 +119,16 @@ export function createKitSignersFromWallet(
 
     // Check wallet features for capabilities
     const features = wallet.features as Record<string, Record<string, (...args: unknown[]) => unknown>>;
-    const hasSignMessage = Boolean(features['solana:signMessage']);
+
+    // Wallet Standard scopes features per account, and wallets reject an account that
+    // omits the feature name even when the wallet itself advertises it - the same gate
+    // `createOffchainMessageSigner` applies. Fall back to the wallet-level list only for
+    // accounts that advertise nothing at all.
+    const accountFeatures: readonly string[] = account.features ?? [];
+    const accountSupports = (feature: string) =>
+        accountFeatures.length === 0 ? Boolean(features[feature]) : accountFeatures.includes(feature);
+
+    const hasSignMessage = Boolean(features['solana:signMessage']) && accountSupports('solana:signMessage');
     const hasSignAndSendTransaction = Boolean(features['solana:signAndSendTransaction']);
     const hasSendTransaction = Boolean(features['solana:sendTransaction']);
 
