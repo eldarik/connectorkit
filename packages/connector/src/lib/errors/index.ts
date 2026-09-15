@@ -13,7 +13,10 @@ export abstract class ConnectorError extends Error {
     readonly timestamp: string;
 
     constructor(message: string, context?: Record<string, unknown>, originalError?: Error) {
-        super(message);
+        // Set the standard ES `cause` as well as `.originalError`. Only `cause`
+        // is walked by console/`util.inspect` and by most error-reporting tools,
+        // so without it the wallet's own diagnostic never reaches the developer.
+        super(message, originalError ? { cause: originalError } : undefined);
         this.name = this.constructor.name;
         this.context = context;
         this.originalError = originalError;
@@ -32,7 +35,13 @@ export abstract class ConnectorError extends Error {
             recoverable: this.recoverable,
             context: this.context,
             timestamp: this.timestamp,
-            originalError: this.originalError?.message,
+            originalError: this.originalError
+                ? {
+                      name: this.originalError.name,
+                      message: this.originalError.message,
+                      stack: this.originalError.stack,
+                  }
+                : undefined,
         };
     }
 }
@@ -213,6 +222,25 @@ export const Errors = {
         new TransactionError('USER_REJECTED', `User rejected ${operation}`, { operation }),
 } as const;
 
+/**
+ * Coerce an unknown thrown value into an `Error` so it can always be carried as
+ * a `cause`. Wallets throw strings and plain objects as often as they throw
+ * `Error`s, and those used to be dropped entirely.
+ */
+export function toError(value: unknown): Error {
+    return value instanceof Error ? value : new Error(String(value));
+}
+
+/**
+ * Build a wrapper message that keeps the underlying error's own text visible.
+ *
+ * A bare 'Failed to sign message' hides every wallet-specific diagnostic behind
+ * one generic string, which makes these failures very hard to triage.
+ */
+export function withCauseMessage(summary: string, cause: Error): string {
+    return cause.message ? `${summary}: ${cause.message}` : summary;
+}
+
 export function toConnectorError(error: unknown, defaultMessage = 'An unexpected error occurred'): ConnectorError {
     if (isConnectorError(error)) {
         return error;
@@ -244,7 +272,8 @@ export function toConnectorError(error: unknown, defaultMessage = 'An unexpected
         return new TransactionError('SIGNING_FAILED', error.message, undefined, error);
     }
 
-    return new TransactionError('SIGNING_FAILED', defaultMessage, { originalError: String(error) });
+    const cause = toError(error);
+    return new TransactionError('SIGNING_FAILED', withCauseMessage(defaultMessage, cause), undefined, cause);
 }
 
 export function getUserFriendlyMessage(error: unknown): string {
