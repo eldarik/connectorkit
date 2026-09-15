@@ -35,11 +35,13 @@ export abstract class ConnectorError extends Error {
             recoverable: this.recoverable,
             context: this.context,
             timestamp: this.timestamp,
+            // Deliberately no `stack`: `toJSON()` is what consumers hand to telemetry,
+            // and a wallet extension's stack leaks its internal paths and extension ID.
+            // The stack stays on the live error object for local debugging.
             originalError: this.originalError
                 ? {
                       name: this.originalError.name,
                       message: this.originalError.message,
-                      stack: this.originalError.stack,
                   }
                 : undefined,
         };
@@ -222,23 +224,63 @@ export const Errors = {
         new TransactionError('USER_REJECTED', `User rejected ${operation}`, { operation }),
 } as const;
 
+/** Marks an `Error` whose message is only a stringification of the thrown value. */
+const SYNTHESIZED_MESSAGE = Symbol('connector.synthesizedMessage');
+
 /**
  * Coerce an unknown thrown value into an `Error` so it can always be carried as
  * a `cause`. Wallets throw strings and plain objects as often as they throw
  * `Error`s, and those used to be dropped entirely.
  */
 export function toError(value: unknown): Error {
-    return value instanceof Error ? value : new Error(String(value));
+    if (value instanceof Error) {
+        return value;
+    }
+
+    if (typeof value === 'string') {
+        return new Error(value);
+    }
+
+    // Injected providers reject with plain objects far more often than with `Error`s -
+    // `{ code: 4001, message: 'User rejected the request.' }` is the shape every
+    // EIP-1193-style provider uses. `String(value)` renders that as '[object Object]',
+    // which loses the message and, with it, the user-rejection classification that
+    // every caller downstream derives from the message text.
+    if (value !== null && typeof value === 'object') {
+        const record = value as { message?: unknown; reason?: unknown; code?: unknown };
+        const text = typeof record.message === 'string' ? record.message : record.reason;
+
+        if (typeof text === 'string' && text.length > 0) {
+            const error = new Error(text, { cause: value });
+            if (record.code !== undefined) {
+                (error as Error & { code?: unknown }).code = record.code;
+            }
+            return error;
+        }
+    }
+
+    // Nothing here carries a diagnostic of its own - the message is only a
+    // stringification ('null', 'undefined', '[object Object]'). Mark it so
+    // `withCauseMessage` does not paste that onto a user-facing summary.
+    const synthesized = new Error(String(value), { cause: value });
+    Object.defineProperty(synthesized, SYNTHESIZED_MESSAGE, { value: true });
+    return synthesized;
 }
 
 /**
  * Build a wrapper message that keeps the underlying error's own text visible.
  *
  * A bare 'Failed to sign message' hides every wallet-specific diagnostic behind
- * one generic string, which makes these failures very hard to triage.
+ * one generic string, which makes these failures very hard to triage. An error
+ * `toError` synthesized from a value with no message of its own is skipped:
+ * 'Failed to sign message: [object Object]' is noise, not a diagnostic.
  */
 export function withCauseMessage(summary: string, cause: Error): string {
-    return cause.message ? `${summary}: ${cause.message}` : summary;
+    if (!cause.message || SYNTHESIZED_MESSAGE in cause) {
+        return summary;
+    }
+
+    return `${summary}: ${cause.message}`;
 }
 
 export function toConnectorError(error: unknown, defaultMessage = 'An unexpected error occurred'): ConnectorError {
