@@ -18,6 +18,9 @@ interface LegacyConnectResult {
     accounts?: unknown[];
 }
 
+/** An account synthesized for a directly-detected (non-registry) wallet. */
+type SynthesizedAccount = Wallet['accounts'][number];
+
 export class AutoConnector {
     private walletDetector: WalletDetector;
     private connectionManager: ConnectionManager;
@@ -133,6 +136,28 @@ export class AutoConnector {
         try {
             const features: Record<string, Record<string, (...args: unknown[]) => unknown>> = {};
 
+            // Accounts resolved by the `standard:connect` shim below. The synthesized
+            // wallet object is built before connect runs, so it exposes these through a
+            // getter instead of the empty literal it used to ship: a wallet whose
+            // `accounts` stay empty hands consumers an account it never issued, and the
+            // wallet then throws when its own feature is called with it.
+            const resolvedAccounts: SynthesizedAccount[] = [];
+
+            const makeAccount = (address: string, publicKey: Uint8Array): SynthesizedAccount => ({
+                address,
+                publicKey,
+                chains: ['solana:mainnet', 'solana:devnet', 'solana:testnet'] as const,
+                // Wallet Standard scopes features per account and consumers gate on this
+                // list (off-chain message signing reads `account.features` directly), so
+                // an empty array silently disables every such capability check.
+                features: Object.keys(features),
+            });
+
+            const resolveAccounts = (accounts: SynthesizedAccount[]) => {
+                resolvedAccounts.splice(0, resolvedAccounts.length, ...accounts);
+                return { accounts };
+            };
+
             if (directWallet.connect) {
                 features['standard:connect'] = {
                     connect: async (...args: unknown[]) => {
@@ -160,16 +185,7 @@ export class AutoConnector {
                                 ? legacyResult.publicKey.toBytes()
                                 : new Uint8Array();
 
-                            return {
-                                accounts: [
-                                    {
-                                        address,
-                                        publicKey: publicKeyBytes,
-                                        chains: ['solana:mainnet', 'solana:devnet', 'solana:testnet'] as const,
-                                        features: [],
-                                    },
-                                ],
-                            };
+                            return resolveAccounts([makeAccount(address, publicKeyBytes)]);
                         }
 
                         if (directWallet.publicKey && typeof directWallet.publicKey.toString === 'function') {
@@ -181,16 +197,7 @@ export class AutoConnector {
                             if (this.debug) {
                                 logger.debug('Using legacy wallet pattern - publicKey from wallet object');
                             }
-                            return {
-                                accounts: [
-                                    {
-                                        address,
-                                        publicKey: publicKeyBytes,
-                                        chains: ['solana:mainnet', 'solana:devnet', 'solana:testnet'] as const,
-                                        features: [],
-                                    },
-                                ],
-                            };
+                            return resolveAccounts([makeAccount(address, publicKeyBytes)]);
                         }
 
                         const publicKeyResult = result as LegacyPublicKey | undefined;
@@ -204,16 +211,7 @@ export class AutoConnector {
                                 ? publicKeyResult.toBytes()
                                 : new Uint8Array();
 
-                            return {
-                                accounts: [
-                                    {
-                                        address,
-                                        publicKey: publicKeyBytes,
-                                        chains: ['solana:mainnet', 'solana:devnet', 'solana:testnet'] as const,
-                                        features: [],
-                                    },
-                                ],
-                            };
+                            return resolveAccounts([makeAccount(address, publicKeyBytes)]);
                         }
 
                         if (this.debug) {
@@ -241,9 +239,26 @@ export class AutoConnector {
             if (directWallet.signMessage) {
                 const signMessageFn = directWallet.signMessage;
                 features['solana:signMessage'] = {
-                    signMessage: (...args: unknown[]) => {
-                        const msg = args[0] as Uint8Array;
-                        return signMessageFn.call(directWallet, msg);
+                    // Callers invoke this Wallet Standard style - `signMessage({ account,
+                    // message, chain })` - but the injected provider underneath takes raw
+                    // bytes. Unwrap the input rather than forwarding the whole object, and
+                    // return the array of outputs the standard (and every caller here)
+                    // expects rather than a bare `{ signature }`.
+                    signMessage: async (...args: unknown[]) => {
+                        const input = args[0];
+                        const message =
+                            input instanceof Uint8Array
+                                ? input
+                                : ((input as { message?: Uint8Array } | undefined)?.message ?? input);
+
+                        const result = await signMessageFn.call(directWallet, message as Uint8Array);
+
+                        if (Array.isArray(result)) {
+                            return result;
+                        }
+
+                        const signature = (result as { signature?: Uint8Array } | undefined)?.signature ?? result;
+                        return [{ signature, signedMessage: message }];
                     },
                 };
             }
@@ -269,7 +284,11 @@ export class AutoConnector {
                     'solana:testnet',
                 ]) as readonly `${string}:${string}`[],
                 features,
-                accounts: [] as const,
+                // Populated by the `standard:connect` shim above once the wallet reports
+                // its public key; a getter because the wallet object is built first.
+                get accounts() {
+                    return resolvedAccounts;
+                },
             };
 
             const walletWithIcon = applyWalletIconOverride(wallet);

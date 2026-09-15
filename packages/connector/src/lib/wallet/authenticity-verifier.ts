@@ -116,12 +116,24 @@ export class WalletAuthenticityVerifier {
             identityConsistency: 0.1,
         };
 
-        const confidence =
-            securityScore.walletStandardCompliance * weights.walletStandardCompliance +
+        // A legacy injected provider (e.g. `window.solana`) has no `features` object
+        // at all - its Wallet Standard object is registered separately. Scoring it 0
+        // on compliance forfeits the full 0.25 weight, capping such a provider at
+        // 0.75 confidence for a criterion it structurally cannot meet. Renormalize
+        // over the criteria that actually apply instead, so a legacy provider is
+        // judged on the evidence available rather than penalized for its shape.
+        const complianceApplies = Boolean(wallet.features && typeof wallet.features === 'object');
+
+        const weightedSum =
+            (complianceApplies ? securityScore.walletStandardCompliance * weights.walletStandardCompliance : 0) +
             securityScore.methodIntegrity * weights.methodIntegrity +
             securityScore.chainSupport * weights.chainSupport +
             securityScore.maliciousPatterns * weights.maliciousPatterns +
             securityScore.identityConsistency * weights.identityConsistency;
+
+        const totalWeight = complianceApplies ? 1 : 1 - weights.walletStandardCompliance;
+
+        const confidence = weightedSum / totalWeight;
 
         // Determine authenticity threshold
         const AUTHENTICITY_THRESHOLD = 0.6; // 60% confidence required
@@ -322,13 +334,23 @@ export class WalletAuthenticityVerifier {
         }
 
         // 4. Check for proto pollution or __proto__ manipulation
-        if ('__proto__' in walletObj || 'constructor' in walletObj) {
-            // These are normal on all objects, but check if they're been tampered with
-            const proto = Object.getPrototypeOf(walletObj);
-            if (proto !== Object.prototype && proto !== null) {
-                score -= 0.1;
-                warnings.push('Wallet has unusual prototype chain');
-            }
+        //
+        // Note: a prototype other than `Object.prototype` is NOT suspicious on its
+        // own - every wallet that exposes its provider as a class instance (which is
+        // most of them, Phantom included) has one. Deducting for that penalized
+        // essentially every real wallet, so only genuine tampering counts here: an
+        // own `__proto__` key, or a prototype that redefines `hasOwnProperty`.
+        if (Object.prototype.hasOwnProperty.call(walletObj, '__proto__')) {
+            score -= 0.1;
+            warnings.push('Wallet defines an own __proto__ property');
+        }
+
+        if (
+            typeof walletObj.hasOwnProperty === 'function' &&
+            walletObj.hasOwnProperty !== Object.prototype.hasOwnProperty
+        ) {
+            score -= 0.1;
+            warnings.push('Wallet overrides hasOwnProperty');
         }
 
         // 5. Check for excessive property count (bloated objects can indicate injection)
