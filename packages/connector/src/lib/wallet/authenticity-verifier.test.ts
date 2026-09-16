@@ -68,6 +68,65 @@ describe('WalletAuthenticityVerifier', () => {
             expect(result.authentic).toBe(false);
         });
 
+        it('should reject a bare class-instance shell impersonating a wallet', () => {
+            // The one trait a minimal impersonation shell shares with a real provider is
+            // a custom prototype, so that alone is not penalized. What gives it away is
+            // the combination: a custom prototype, no `features`, no `chains`, and a
+            // method surface of nothing but connect/disconnect. Without the deduction
+            // for that combination this object rides its name match to 0.625 and clears
+            // the 0.6 threshold, after which direct detection hands it to auto-connect.
+            class FakePhantom {
+                name = 'Phantom';
+                connect() {
+                    return Promise.resolve();
+                }
+                disconnect() {
+                    return Promise.resolve();
+                }
+            }
+
+            const result = WalletAuthenticityVerifier.verify(new FakePhantom() as unknown as DirectWallet, 'Phantom');
+
+            expect(result.confidence).toBeLessThan(0.6);
+            expect(result.authentic).toBe(false);
+        });
+
+        it('should accept a genuine class-instance provider with a broad method surface', () => {
+            // Real wallets expose their provider as a class instance too - Phantom
+            // included - so the check above must not catch them. A genuine provider
+            // fails the emptiness test on every count: it declares chains and carries
+            // far more than the two lifecycle methods.
+            class RealPhantom {
+                isPhantom = true;
+                chains = ['solana:mainnet'];
+                connect() {
+                    return Promise.resolve();
+                }
+                disconnect() {
+                    return Promise.resolve();
+                }
+                signTransaction() {
+                    return Promise.resolve();
+                }
+                signAllTransactions() {
+                    return Promise.resolve();
+                }
+                signMessage() {
+                    return Promise.resolve();
+                }
+                request() {
+                    return Promise.resolve();
+                }
+                on() {}
+                off() {}
+            }
+
+            const result = WalletAuthenticityVerifier.verify(new RealPhantom() as unknown as DirectWallet, 'Phantom');
+
+            expect(result.authentic).toBe(true);
+            expect(result.confidence).toBeGreaterThanOrEqual(0.6);
+        });
+
         it('should accept a genuine legacy provider despite having no features object', () => {
             const legacy = {
                 connect: vi.fn(),
