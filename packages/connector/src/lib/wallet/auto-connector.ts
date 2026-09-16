@@ -255,24 +255,35 @@ export class AutoConnector {
                 features['solana:signMessage'] = {
                     // Callers invoke this Wallet Standard style - `signMessage({ account,
                     // message, chain })` - but the injected provider underneath takes raw
-                    // bytes. Unwrap the input rather than forwarding the whole object, and
+                    // bytes. Unwrap each input rather than forwarding the whole object, and
                     // return the array of outputs the standard (and every caller here)
                     // expects rather than a bare `{ signature }`.
+                    //
+                    // The standard method is variadic: one input per message to sign. Every
+                    // input gets its own call to the legacy signer and contributes its own
+                    // output, so a caller asking for N messages is not silently answered
+                    // with one signature for the first.
                     signMessage: async (...args: unknown[]) => {
-                        const input = args[0];
-                        const message =
-                            input instanceof Uint8Array
-                                ? input
-                                : ((input as { message?: Uint8Array } | undefined)?.message ?? input);
+                        const outputs: unknown[] = [];
 
-                        const result = await signMessageFn.call(directWallet, message as Uint8Array);
+                        for (const input of args) {
+                            const message =
+                                input instanceof Uint8Array
+                                    ? input
+                                    : ((input as { message?: Uint8Array } | undefined)?.message ?? input);
 
-                        if (Array.isArray(result)) {
-                            return result;
+                            const result = await signMessageFn.call(directWallet, message as Uint8Array);
+
+                            if (Array.isArray(result)) {
+                                outputs.push(...result);
+                                continue;
+                            }
+
+                            const signature = (result as { signature?: Uint8Array } | undefined)?.signature ?? result;
+                            outputs.push({ signature, signedMessage: message });
                         }
 
-                        const signature = (result as { signature?: Uint8Array } | undefined)?.signature ?? result;
-                        return [{ signature, signedMessage: message }];
+                        return outputs;
                     },
                 };
             }

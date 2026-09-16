@@ -363,6 +363,46 @@ export class WalletAuthenticityVerifier {
             warnings.push('Wallet overrides hasOwnProperty');
         }
 
+        // A custom prototype is neutral on its own, as above - but it is also the one
+        // trait a bare impersonation shell shares with a real provider. A genuine
+        // class-instance wallet carries a broad method surface (signTransaction,
+        // signMessage, event emitters, `request`) and declares `features` or `chains`;
+        // a shell named after the wallet with nothing but `connect` / `disconnect`
+        // declares neither, and would otherwise clear the 0.6 threshold on its name
+        // match alone. Only that combination is penalized, so real providers - which
+        // fail the emptiness test - keep a clean score.
+        const proto = Object.getPrototypeOf(walletObj);
+        const hasCustomPrototype = proto !== Object.prototype && proto !== null;
+
+        if (hasCustomPrototype && !wallet.features && !Array.isArray(wallet.chains)) {
+            const MINIMAL_METHOD_SURFACE = 4;
+            const methodNames = new Set<string>();
+
+            for (
+                let current: object | null = walletObj;
+                current && current !== Object.prototype;
+                current = Object.getPrototypeOf(current)
+            ) {
+                for (const key of Object.getOwnPropertyNames(current)) {
+                    if (key === 'constructor') continue;
+                    try {
+                        if (typeof walletObj[key] === 'function') {
+                            methodNames.add(key);
+                        }
+                    } catch {
+                        // A throwing getter tells us nothing either way - skip it.
+                    }
+                }
+            }
+
+            if (methodNames.size < MINIMAL_METHOD_SURFACE) {
+                score -= 0.15;
+                warnings.push(
+                    `Wallet is a bare custom-prototype object with only ${methodNames.size} method(s) and no features or chains`,
+                );
+            }
+        }
+
         // 5. Check for excessive property count (bloated objects can indicate injection)
         const propCount = Object.keys(walletObj).length;
         if (propCount > 100) {

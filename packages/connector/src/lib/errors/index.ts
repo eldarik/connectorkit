@@ -35,15 +35,15 @@ export abstract class ConnectorError extends Error {
             recoverable: this.recoverable,
             context: this.context,
             timestamp: this.timestamp,
+            // `originalError` stays the message string it has always been - this payload
+            // is public and consumers store, validate and forward it as such. The name
+            // rides alongside in its own field instead of restructuring the old one.
+            //
             // Deliberately no `stack`: `toJSON()` is what consumers hand to telemetry,
             // and a wallet extension's stack leaks its internal paths and extension ID.
             // The stack stays on the live error object for local debugging.
-            originalError: this.originalError
-                ? {
-                      name: this.originalError.name,
-                      message: this.originalError.message,
-                  }
-                : undefined,
+            originalError: this.originalError?.message,
+            originalErrorName: this.originalError?.name,
         };
     }
 }
